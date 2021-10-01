@@ -237,7 +237,7 @@ scan_out_primary_view(struct cg_output *output)
 }
 
 static void
-output_enable(struct cg_output *output)
+output_enable(struct cg_server *server, struct cg_output *output)
 {
 	struct wlr_output *wlr_output = output->wlr_output;
 
@@ -246,7 +246,23 @@ output_enable(struct cg_output *output)
 	 * duplicate the enabled property in cg_output. */
 	wlr_log(WLR_DEBUG, "Enabling output %s", wlr_output->name);
 
-	wlr_output_layout_add_auto(output->server->output_layout, wlr_output);
+	if (server->output_extend_mode == CAGE_OUTPUT_EXTEND_MODE_RIGHT) {
+		int max_x = 0, max_x_y = 0;
+		struct wlr_output_layout_output *l_output;
+		wl_list_for_each(l_output, &output->server->output_layout->outputs, link) {
+			int width, height;
+			wlr_output_effective_resolution(l_output->output, &width, &height);
+			if (l_output->x + width > max_x) {
+				max_x = l_output->x + width;
+				max_x_y = l_output->y;
+			}
+		}
+
+		wlr_output_layout_add(output->server->output_layout, wlr_output, max_x, max_x_y);
+	} else {
+		wlr_output_layout_add_auto(output->server->output_layout, wlr_output);
+	}
+
 	wlr_output_enable(wlr_output, true);
 	wlr_output_commit(wlr_output);
 }
@@ -411,7 +427,7 @@ output_destroy(struct cg_output *output)
 	} else if (server->output_mode == CAGE_MULTI_OUTPUT_MODE_LAST) {
 		struct cg_output *prev = wl_container_of(server->outputs.next, prev, link);
 		if (prev) {
-			output_enable(prev);
+			output_enable(server, prev);
 
 			struct cg_view *view;
 			wl_list_for_each (view, &server->views, link) {
@@ -482,7 +498,7 @@ handle_new_output(struct wl_listener *listener, void *data)
 			wlr_output->scale);
 	}
 
-	output_enable(output);
+	output_enable(server, output);
 
 	struct cg_view *view;
 	wl_list_for_each (view, &output->server->views, link) {
