@@ -28,6 +28,7 @@
 #include <wlr/types/wlr_output_layout.h>
 #include <wlr/types/wlr_surface.h>
 #include <wlr/types/wlr_xdg_shell.h>
+#include <wlr/types/wlr_output_management_v1.h>
 #include <wlr/util/log.h>
 #include <wlr/util/region.h>
 
@@ -236,8 +237,24 @@ scan_out_primary_view(struct cg_output *output)
 	return wlr_output_commit(wlr_output);
 }
 
+static void update_output_manager_config(struct cg_server *server) {
+	struct wlr_output_configuration_v1 *config = wlr_output_configuration_v1_create();
+
+	struct cg_output *output;
+	wl_list_for_each (output, &server->outputs, link) {
+		struct wlr_output_configuration_head_v1 *config_head = wlr_output_configuration_head_v1_create(config, output->wlr_output);
+		struct wlr_box *box = wlr_output_layout_get_box(server->output_layout, output->wlr_output);
+		if (box) {
+			config_head->state.x = box->x;
+			config_head->state.y = box->y;
+		}
+	}
+
+	wlr_output_manager_v1_set_configuration(server->output_manager_v1, config);
+}
+
 static void
-output_enable(struct cg_server *server, struct cg_output *output)
+output_enable(struct cg_output *output)
 {
 	struct wlr_output *wlr_output = output->wlr_output;
 
@@ -246,7 +263,7 @@ output_enable(struct cg_server *server, struct cg_output *output)
 	 * duplicate the enabled property in cg_output. */
 	wlr_log(WLR_DEBUG, "Enabling output %s", wlr_output->name);
 
-	if (server->output_extend_mode == CAGE_OUTPUT_EXTEND_MODE_RIGHT) {
+	if (output->server->output_extend_mode == CAGE_OUTPUT_EXTEND_MODE_RIGHT) {
 		int max_x = 0, max_x_y = 0;
 		struct wlr_output_layout_output *l_output;
 		wl_list_for_each(l_output, &output->server->output_layout->outputs, link) {
@@ -265,6 +282,8 @@ output_enable(struct cg_server *server, struct cg_output *output)
 
 	wlr_output_enable(wlr_output, true);
 	wlr_output_commit(wlr_output);
+
+	update_output_manager_config(output->server);
 }
 
 static void
@@ -281,6 +300,36 @@ output_disable(struct cg_output *output)
 	wlr_output_enable(wlr_output, false);
 	wlr_output_layout_remove(output->server->output_layout, wlr_output);
 	wlr_output_commit(wlr_output);
+
+	update_output_manager_config(output->server);
+}
+
+static void
+output_apply_config(struct cg_output *output, struct wlr_output_configuration_head_v1 *head)
+{
+	struct wlr_output *wlr_output = output->wlr_output;
+
+	wlr_log(WLR_DEBUG, "Applying configuration for output %s", wlr_output->name);
+
+	if (!head->state.enabled) {
+		output_disable(output);
+		return;
+	}
+
+	if (head->state.mode) {
+		wlr_output_set_mode(wlr_output, head->state.mode);
+	} else {
+		wlr_output_set_custom_mode(wlr_output, head->state.custom_mode.width, head->state.custom_mode.height, head->state.custom_mode.refresh);
+	}
+
+	wlr_output_layout_add(output->server->output_layout, head->state.output, head->state.x, head->state.y);
+	wlr_output_set_scale(wlr_output, head->state.scale);
+	wlr_output_set_transform(wlr_output, head->state.transform);
+
+	wlr_output_enable(wlr_output, true);
+	wlr_output_commit(wlr_output);
+
+	update_output_manager_config(output->server);
 }
 
 static void
@@ -427,7 +476,7 @@ output_destroy(struct cg_output *output)
 	} else if (server->output_mode == CAGE_MULTI_OUTPUT_MODE_LAST) {
 		struct cg_output *prev = wl_container_of(server->outputs.next, prev, link);
 		if (prev) {
-			output_enable(server, prev);
+			output_enable(prev);
 
 			struct cg_view *view;
 			wl_list_for_each (view, &server->views, link) {
@@ -498,7 +547,7 @@ handle_new_output(struct wl_listener *listener, void *data)
 			wlr_output->scale);
 	}
 
-	output_enable(server, output);
+	output_enable(output);
 
 	struct cg_view *view;
 	wl_list_for_each (view, &output->server->views, link) {
@@ -523,4 +572,64 @@ output_set_window_title(struct cg_output *output, const char *title)
 		wlr_x11_output_set_title(wlr_output, title);
 #endif
 	}
+}
+
+static bool
+output_config_test(struct cg_server *server, struct wlr_output_configuration_v1 *config)
+{
+	/* TODO */
+	return true;
+}
+
+static bool
+output_config_apply(struct cg_server *server, struct wlr_output_configuration_v1 *config)
+{
+	if (!output_config_test(server, config)) {
+		return false;
+	}
+
+	struct wlr_output_configuration_head_v1 *head;
+	wl_list_for_each(head, &config->heads, link) {
+		wlr_log(WLR_INFO, "Applying configuration for output %s", head->state.output->name);
+
+		struct cg_output *output;
+		wl_list_for_each (output, &server->outputs, link) {
+			if (strcmp(head->state.output->name, output->wlr_output->name) == 0) {
+				output_apply_config(output, head);
+				break;
+			}
+		}
+	}
+
+	return true;
+}
+
+void
+handle_output_manager_apply(struct wl_listener *listener, void *data)
+{
+        struct cg_server *server = wl_container_of(listener, server, output_manager_apply);
+        struct wlr_output_configuration_v1 *config = data;
+
+        if (output_config_apply(server, config)) {
+		wlr_output_configuration_v1_send_succeeded(config);
+	} else {
+		wlr_output_configuration_v1_send_failed(config);
+	}
+
+	wlr_output_configuration_v1_destroy(config);
+}
+
+void
+handle_output_manager_test(struct wl_listener *listener, void *data)
+{
+	struct cg_server *server = wl_container_of(listener, server, output_manager_test);
+	struct wlr_output_configuration_v1 *config = data;
+
+	if (output_config_test(server, config)) {
+		wlr_output_configuration_v1_send_succeeded(config);
+	} else {
+		wlr_output_configuration_v1_send_failed(config);
+	}
+
+	wlr_output_configuration_v1_destroy(config);
 }

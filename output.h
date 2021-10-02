@@ -34,5 +34,7 @@ void output_drag_icons_for_each_surface(struct cg_output *output, struct wl_list
 					cg_surface_iterator_func_t iterator, void *user_data);
 void output_damage_surface(struct cg_output *output, struct wlr_surface *surface, double lx, double ly, bool whole);
 void output_set_window_title(struct cg_output *output, const char *title);
+void handle_output_manager_apply(struct wl_listener *listener, void *data);
+void handle_output_manager_test(struct wl_listener *listener, void *data);
 
 #endif
